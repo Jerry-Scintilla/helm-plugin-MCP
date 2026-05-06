@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "helm-plugin-mcp"
+version = "0.1.0"
+description = "Helm MCP Bridge — 通过 Model Context Protocol 将 Helm 暴露给大型语言模型"
+requires-python = ">=3.12"
+dependencies = [
+    "mcp>=1.1,<2.0",
+]
+
+[project.entry-points."helm.plugins"]
+helm-mcp = "helm_mcp.plugin:HelmMCPPlugin"
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.setuptools.package-data]
+helm_mcp = [
+    "frontend/dist/**",
+    "migrations/versions/*.py",
+]

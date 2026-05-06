@@ -1,0 +1,39 @@
+# Claude Code
+.claude/
+
+# Plugin development documentation
+Plugin_Dev_Guide/
+
+# Python build artifacts
+*.egg-info/
+dist/
+build/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Alembic local overrides
+*.db
