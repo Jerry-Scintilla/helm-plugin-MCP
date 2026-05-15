@@ -10,6 +10,7 @@ Contains:
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import time
@@ -45,6 +46,9 @@ _sse_transport = SseServerTransport("/api/v1/plugins/helm-mcp/messages/")
 # Per-session context vars — set once per SSE connection, read by tool handlers.
 _mcp_user: ContextVar[User] = ContextVar("mcp_user")
 _mcp_perms: ContextVar[frozenset[str]] = ContextVar("mcp_perms")
+
+# Active SSE connection tasks — cancelled when the plugin is disabled.
+_active_sse_tasks: set["asyncio.Task[None]"] = set()
 
 
 # ── Helper: superuser sentinel ───────────────────────────────────────────────
@@ -250,21 +254,17 @@ async def _handle_call_tool(
 
 # ── SSE connection entry point ────────────────────────────────────────────────
 
-async def handle_sse_connection(request: Request, api_key: str) -> None:
-    """
-    Called by the FastAPI GET /sse route.
-
-    1. Authenticates the API key and loads the user + permissions.
-    2. Binds them to ContextVars for the lifetime of this SSE task.
-    3. Runs the MCP server over the SSE streams until the client disconnects.
-
-    Note: request._send is a Starlette internal used by MCP SDK's own examples
-    for direct SSE integration. This is the documented integration pattern.
-    """
-    user, perms = await _authenticate(api_key)
-
+async def _run_sse_session(
+    request: Request,
+    user: User,
+    perms: frozenset[str],
+) -> None:
+    """Inner coroutine that runs the actual SSE+MCP session."""
     user_token = _mcp_user.set(user)
     perm_token = _mcp_perms.set(perms)
+    task = asyncio.current_task()
+    if task is not None:
+        _active_sse_tasks.add(task)
     try:
         async with _sse_transport.connect_sse(
             request.scope, request.receive, request._send  # type: ignore[attr-defined]
@@ -277,7 +277,74 @@ async def handle_sse_connection(request: Request, api_key: str) -> None:
     finally:
         _mcp_user.reset(user_token)
         _mcp_perms.reset(perm_token)
+        if task is not None:
+            _active_sse_tasks.discard(task)
+
+
+async def handle_sse_connection(request: Request, api_key: str) -> None:
+    """
+    Called by the FastAPI GET /sse route.
+
+    1. Authenticates the API key and loads the user + permissions.
+    2. Binds them to ContextVars for the lifetime of this SSE task.
+    3. Runs the MCP server over the SSE streams until the client disconnects.
+
+    The session is wrapped in asyncio.wait_for with a deadline so that if
+    cancel_all_sse_connections() cannot interrupt the task (e.g. the MCP
+    library swallows CancelledError in aly close()), the task still exits
+    after the timeout rather than hanging forever and exhausting the DB pool.
+    """
+    user, perms = await _authenticate(api_key)
+
+    SSE_SESSION_DEADLINE = 300.0  # 5 minutes — normal SSE connections expire well before this
+
+    try:
+        await asyncio.wait_for(
+            _run_sse_session(request, user, perms),
+            timeout=SSE_SESSION_DEADLINE,
+        )
+    except asyncio.TimeoutError:
+        # Should not happen for a normal session. If it does, force-exit
+        # rather than hang the DB pool.
+        pass
 
 
 def get_sse_transport() -> SseServerTransport:
     return _sse_transport
+
+
+def cancel_all_sse_connections() -> None:
+    """
+    Cancel all active SSE connection tasks. Called by on_disable to prevent hangs.
+
+    Importantly, this does NOT clear _active_sse_tasks immediately — we give
+    cancelled tasks a grace period (CANCEL_TIMEOUT) to actually exit before
+    abandoning them. This prevents the race where cancel() schedules
+    CancelledError but the task is stuck in q.join() and never exits, causing
+    uninstall_plugin's DB session to hang forever.
+    """
+    CANCEL_TIMEOUT = 5.0  # seconds — generous but bounded
+
+    if not _active_sse_tasks:
+        return
+
+    # Request cancellation for all tasks
+    for task in list(_active_sse_tasks):
+        task.cancel()
+
+    # SCHEDULE waiting for tasks to actually exit, rather than clearing
+    # the set immediately.  The wait must be done in a background task so
+    # that on_disable does not block forever if a task is genuinely stuck.
+    async def _wait_for_tasks():
+        done, pending = await asyncio.wait(
+            _active_sse_tasks, timeout=CANCEL_TIMEOUT
+        )
+        # If some tasks are still not done (stuck in q.join()), abandon them
+        for t in pending:
+            t.cancel()
+        _active_sse_tasks.clear()
+
+    # Fire-and-forget; on_disable will not block on this
+    asyncio.get_event_loop().call_soon(
+        lambda: asyncio.create_task(_wait_for_tasks())
+    )

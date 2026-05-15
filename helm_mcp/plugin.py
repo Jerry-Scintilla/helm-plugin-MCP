@@ -8,7 +8,7 @@ from app.plugins.registry import extension_registry
 
 class HelmMCPPlugin(HelmPlugin):
     name = "helm-mcp"
-    version = "0.1.0"
+    version = "0.1.1"
     author = "Jerry_Scintilla"
     description = "通过 Model Context Protocol (MCP) 将 Helm 暴露给大型语言模型"
     helm_sdk_version = ">=1.0,<2.0"
@@ -47,4 +47,12 @@ class HelmMCPPlugin(HelmPlugin):
         from helm_mcp.tool_providers.core import CoreToolProvider
         extension_registry.register("mcp.tool_provider", CoreToolProvider(), self.name)
 
-    # on_disable: framework auto-calls extension_registry.unregister_plugin(self.name)
+    def on_disable(self, ctx: PluginContext) -> None:
+        """Cancel all active SSE connections before the router is unmounted.
+
+        Without this, _sse_transport's internal session channels have no reader
+        after the /messages/ route is removed, causing handle_post_message() to
+        block forever and exhaust the DB connection pool.
+        """
+        from helm_mcp.mcp_server import cancel_all_sse_connections
+        cancel_all_sse_connections()
