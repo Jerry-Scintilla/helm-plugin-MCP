@@ -344,7 +344,9 @@ def cancel_all_sse_connections() -> None:
             t.cancel()
         _active_sse_tasks.clear()
 
-    # Fire-and-forget; on_disable will not block on this
-    asyncio.get_event_loop().call_soon(
+    # Fire-and-forget; on_disable will not block on this.
+    # get_running_loop() is preferred over get_event_loop() in Python 3.10+
+    # when called from a synchronous function invoked inside a running loop.
+    asyncio.get_running_loop().call_soon(
         lambda: asyncio.create_task(_wait_for_tasks())
     )

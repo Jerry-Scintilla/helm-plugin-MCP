@@ -11,7 +11,7 @@ from alembic import op
 
 revision = "0001helm_mcp"
 down_revision = None
-branch_labels = ("helm-mcp",)
+branch_labels = None
 depends_on = None
 
 
@@ -36,11 +36,16 @@ def upgrade() -> None:
         sa.Column("error_message", sa.Text(), nullable=True),
         sa.Column("duration_ms", sa.Integer(), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        if_not_exists=True,
     )
-    op.create_index("ix_helm_mcp_call_logs_user_id",    "helm_mcp_call_logs", ["user_id"])
-    op.create_index("ix_helm_mcp_call_logs_tool_name",  "helm_mcp_call_logs", ["tool_name"])
-    op.create_index("ix_helm_mcp_call_logs_status",     "helm_mcp_call_logs", ["status"])
-    op.create_index("ix_helm_mcp_call_logs_created_at", "helm_mcp_call_logs", ["created_at"])
+    op.create_index("ix_helm_mcp_call_logs_user_id",    "helm_mcp_call_logs", ["user_id"],
+                    if_not_exists=True)
+    op.create_index("ix_helm_mcp_call_logs_tool_name",  "helm_mcp_call_logs", ["tool_name"],
+                    if_not_exists=True)
+    op.create_index("ix_helm_mcp_call_logs_status",     "helm_mcp_call_logs", ["status"],
+                    if_not_exists=True)
+    op.create_index("ix_helm_mcp_call_logs_created_at", "helm_mcp_call_logs", ["created_at"],
+                    if_not_exists=True)
 
 
 def downgrade() -> None:

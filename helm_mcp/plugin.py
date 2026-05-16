@@ -8,7 +8,7 @@ from app.plugins.registry import extension_registry
 
 class HelmMCPPlugin(HelmPlugin):
     name = "helm-mcp"
-    version = "0.1.1"
+    version = "0.1.2"
     author = "Jerry_Scintilla"
     description = "通过 Model Context Protocol (MCP) 将 Helm 暴露给大型语言模型"
     helm_sdk_version = ">=1.0,<2.0"
