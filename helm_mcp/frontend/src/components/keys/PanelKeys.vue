@@ -33,13 +33,15 @@ function onKeyCreated(apiKey: string) {
 </script>
 
 <template>
-  <KeyCreateForm @key-created="onKeyCreated" />
-  <ConfigDisplay
-    v-if="sseUrl"
-    :sse-url="sseUrl"
-    :api-key="lastCreatedKey"
-  />
-  <div v-else class="card">
-    <pre>{{ sseUrl === '' ? '加载中…' : '（配置加载失败，请刷新页面）' }}</pre>
+  <div>
+    <KeyCreateForm @key-created="onKeyCreated" />
+    <ConfigDisplay
+      v-if="sseUrl"
+      :sse-url="sseUrl"
+      :api-key="lastCreatedKey"
+    />
+    <div v-else class="card">
+      <pre>{{ sseUrl === '' ? '加载中…' : '（配置加载失败，请刷新页面）' }}</pre>
+    </div>
   </div>
 </template>

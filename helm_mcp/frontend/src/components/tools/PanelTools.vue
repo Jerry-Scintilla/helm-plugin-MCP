@@ -41,13 +41,15 @@ watch(ready, (isReady) => {
 </script>
 
 <template>
-  <div v-if="loading" class="empty">加载中…</div>
-  <div v-else-if="errorMsg" class="error-msg">工具列表加载失败：{{ errorMsg }}</div>
-  <template v-else>
-    <p style="color:#7a7870;font-size:0.83rem;margin-bottom:12px">
-      共 {{ tools.length }} 个工具
-    </p>
-    <div v-if="tools.length === 0" class="empty">暂无可用工具</div>
-    <ToolCard v-for="tool in tools" :key="tool.name" :tool="tool" />
-  </template>
+  <div>
+    <div v-if="loading" class="empty">加载中…</div>
+    <div v-else-if="errorMsg" class="error-msg">工具列表加载失败：{{ errorMsg }}</div>
+    <template v-else>
+      <p style="color:var(--text-muted);font-size:0.88rem;margin-bottom:12px">
+        共 {{ tools.length }} 个工具
+      </p>
+      <div v-if="tools.length === 0" class="empty">暂无可用工具</div>
+      <ToolCard v-for="tool in tools" :key="tool.name" :tool="tool" />
+    </template>
+  </div>
 </template>

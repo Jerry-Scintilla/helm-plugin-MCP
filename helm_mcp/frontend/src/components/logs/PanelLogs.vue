@@ -56,17 +56,19 @@ watch(ready, (isReady) => {
 </script>
 
 <template>
-  <LogFilter @filter-change="onFilterChange" />
+  <div>
+    <LogFilter @filter-change="onFilterChange" />
 
-  <div v-if="loading" class="empty">加载中…</div>
-  <div v-else-if="errorMsg" class="error-msg">日志加载失败：{{ errorMsg }}</div>
-  <template v-else>
-    <LogTable :items="items" />
-    <Pagination
-      :current="page"
-      :total="total"
-      :page-size="PAGE_SIZE"
-      @page-change="loadLogs"
-    />
-  </template>
+    <div v-if="loading" class="empty">加载中…</div>
+    <div v-else-if="errorMsg" class="error-msg">日志加载失败：{{ errorMsg }}</div>
+    <template v-else>
+      <LogTable :items="items" />
+      <Pagination
+        :current="page"
+        :total="total"
+        :page-size="PAGE_SIZE"
+        @page-change="loadLogs"
+      />
+    </template>
+  </div>
 </template>
