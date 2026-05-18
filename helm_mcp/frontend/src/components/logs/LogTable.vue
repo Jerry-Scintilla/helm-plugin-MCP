@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import { useHelmSDK } from '../../composables/useHelmSDK'
+import { useI18n } from '../../composables/useI18n'
+
 export interface LogItem {
   id: number
   user_id: number
@@ -11,8 +14,11 @@ export interface LogItem {
 
 defineProps<{ items: LogItem[] }>()
 
+const { locale } = useHelmSDK()
+const { t } = useI18n()
+
 function formatDate(iso: string): string {
-  return new Date(iso).toLocaleString('zh-CN', { hour12: false })
+  return new Date(iso).toLocaleString(locale.value === 'zh' ? 'zh-CN' : 'en-US', { hour12: false })
 }
 </script>
 
@@ -21,17 +27,17 @@ function formatDate(iso: string): string {
     <table>
       <thead>
         <tr>
-          <th>时间</th>
-          <th>工具</th>
-          <th>用户 ID</th>
-          <th>状态</th>
-          <th>耗时 (ms)</th>
-          <th>错误信息</th>
+          <th>{{ t('logs.table.time') }}</th>
+          <th>{{ t('logs.table.tool') }}</th>
+          <th>{{ t('logs.table.userId') }}</th>
+          <th>{{ t('logs.table.status') }}</th>
+          <th>{{ t('logs.table.duration') }}</th>
+          <th>{{ t('logs.table.error') }}</th>
         </tr>
       </thead>
       <tbody>
         <tr v-if="items.length === 0">
-          <td colspan="6" class="empty">暂无日志记录</td>
+          <td colspan="6" class="empty">{{ t('logs.table.empty') }}</td>
         </tr>
         <tr v-for="log in items" :key="log.id">
           <td style="white-space:nowrap;color:#7a7870">{{ formatDate(log.created_at) }}</td>

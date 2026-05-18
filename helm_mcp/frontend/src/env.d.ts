@@ -3,11 +3,13 @@
 interface HelmSDKContext {
   token: string
   apiBase: string
+  locale?: 'zh' | 'en'
 }
 
 interface HelmSDK {
   init(callback: (ctx: HelmSDKContext) => void): void
   getToken(): string
+  getLocale(): 'zh' | 'en'
   requestTokenRefresh(): void
 }
 

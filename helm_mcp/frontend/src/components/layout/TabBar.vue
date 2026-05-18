@@ -1,13 +1,17 @@
 <script setup lang="ts">
+import { useI18n } from '../../composables/useI18n'
+
 export type TabName = 'keys' | 'tools' | 'logs'
 
 const props = defineProps<{ modelValue: TabName }>()
 const emit = defineEmits<{ (e: 'update:modelValue', tab: TabName): void }>()
 
-const tabs: { name: TabName; label: string }[] = [
-  { name: 'keys',  label: '🔑 API 密钥' },
-  { name: 'tools', label: '🛠 可用工具' },
-  { name: 'logs',  label: '📋 调用日志' },
+const { t } = useI18n()
+
+const tabs: { name: TabName }[] = [
+  { name: 'keys' },
+  { name: 'tools' },
+  { name: 'logs' },
 ]
 </script>
 
@@ -20,7 +24,7 @@ const tabs: { name: TabName; label: string }[] = [
       :class="{ active: props.modelValue === tab.name }"
       @click="emit('update:modelValue', tab.name)"
     >
-      {{ tab.label }}
+      {{ t('tabs.' + tab.name) }}
     </div>
   </div>
 </template>

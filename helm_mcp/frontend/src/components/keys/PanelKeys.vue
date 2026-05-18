@@ -2,6 +2,7 @@
 import { ref, watch } from 'vue'
 import { useHelmSDK } from '../../composables/useHelmSDK'
 import { useApiFetch } from '../../composables/useApiFetch'
+import { useI18n } from '../../composables/useI18n'
 import KeyCreateForm from './KeyCreateForm.vue'
 import ConfigDisplay from './ConfigDisplay.vue'
 
@@ -9,6 +10,7 @@ interface MCPConfig { sse_url: string }
 
 const { ready } = useHelmSDK()
 const { apiFetch } = useApiFetch()
+const { t } = useI18n()
 
 const sseUrl = ref('')
 const lastCreatedKey = ref<string | undefined>()
@@ -41,7 +43,7 @@ function onKeyCreated(apiKey: string) {
       :api-key="lastCreatedKey"
     />
     <div v-else class="card">
-      <pre>{{ sseUrl === '' ? '加载中…' : '（配置加载失败，请刷新页面）' }}</pre>
+      <pre>{{ sseUrl === '' ? t('keys.loading') : t('keys.configFailed') }}</pre>
     </div>
   </div>
 </template>

@@ -2,20 +2,22 @@
 import { ref } from 'vue'
 import { useApiFetch } from '../../composables/useApiFetch'
 import { useToast } from '../../composables/useToast'
+import { useI18n } from '../../composables/useI18n'
 
 const emit = defineEmits<{ (e: 'key-created', apiKey: string): void }>()
 
 const { apiFetch } = useApiFetch()
 const { showToast } = useToast()
+const { t } = useI18n()
 
 const keyName = ref('')
 const createdKey = ref('')
-const copyLabel = ref('复制')
+const copyLabel = ref(t('keys.create.copy'))
 
 async function createKey() {
   const name = keyName.value.trim()
   if (!name) {
-    showToast('请输入密钥备注名')
+    showToast(t('keys.toast.empty'))
     return
   }
 
@@ -28,43 +30,43 @@ async function createKey() {
     if (data.api_key) {
       createdKey.value = data.api_key
       keyName.value = ''
-      copyLabel.value = '复制'
+      copyLabel.value = t('keys.create.copy')
       emit('key-created', data.api_key)
     } else {
-      showToast('创建失败：' + (data.detail ?? JSON.stringify(data)), 'error')
+      showToast(t('keys.toast.createFailed', { msg: data.detail ?? JSON.stringify(data) }), 'error')
     }
   } catch (err) {
-    showToast('请求失败：' + (err instanceof Error ? err.message : String(err)), 'error')
+    showToast(t('keys.toast.requestFailed', { msg: err instanceof Error ? err.message : String(err) }), 'error')
   }
 }
 
 async function copyKey() {
   try {
     await navigator.clipboard.writeText(createdKey.value)
-    copyLabel.value = '已复制 ✓'
-    showToast('已复制到剪贴板', 'success')
+    copyLabel.value = t('keys.create.copied')
+    showToast(t('keys.toast.copied'), 'success')
   } catch {
-    showToast('复制失败，请手动选择文字复制', 'error')
+    showToast(t('keys.toast.copyFailed'), 'error')
   }
 }
 </script>
 
 <template>
   <div class="card">
-    <h3>创建新 MCP 密钥</h3>
+    <h3>{{ t('keys.create.title') }}</h3>
     <div class="row">
       <input
         v-model="keyName"
         type="text"
-        placeholder="密钥备注名，如 claude-desktop"
+        :placeholder="t('keys.create.placeholder')"
         maxlength="128"
         @keyup.enter="createKey"
       />
-      <button class="btn" @click="createKey">创建密钥</button>
+      <button class="btn" @click="createKey">{{ t('keys.create.btn') }}</button>
     </div>
 
     <template v-if="createdKey">
-      <p class="text-warn mt">⚠️ 完整密钥只显示一次，请立即复制并妥善保存：</p>
+      <p class="text-warn mt">{{ t('keys.create.warning') }}</p>
       <div class="key-reveal">{{ createdKey }}</div>
       <button class="btn secondary sm mt" @click="copyKey">{{ copyLabel }}</button>
     </template>

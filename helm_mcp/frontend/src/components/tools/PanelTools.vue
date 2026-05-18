@@ -2,6 +2,7 @@
 import { ref, watch } from 'vue'
 import { useHelmSDK } from '../../composables/useHelmSDK'
 import { useApiFetch } from '../../composables/useApiFetch'
+import { useI18n } from '../../composables/useI18n'
 import ToolCard from './ToolCard.vue'
 
 interface MCPTool {
@@ -14,6 +15,7 @@ interface MCPTool {
 
 const { ready } = useHelmSDK()
 const { apiFetch } = useApiFetch()
+const { t } = useI18n()
 
 const tools = ref<MCPTool[]>([])
 const loading = ref(true)
@@ -42,13 +44,13 @@ watch(ready, (isReady) => {
 
 <template>
   <div>
-    <div v-if="loading" class="empty">加载中…</div>
-    <div v-else-if="errorMsg" class="error-msg">工具列表加载失败：{{ errorMsg }}</div>
+    <div v-if="loading" class="empty">{{ t('tools.loading') }}</div>
+    <div v-else-if="errorMsg" class="error-msg">{{ t('tools.loadFailed', { msg: errorMsg }) }}</div>
     <template v-else>
       <p style="color:var(--text-muted);font-size:0.88rem;margin-bottom:12px">
-        共 {{ tools.length }} 个工具
+        {{ t('tools.count', { n: tools.length }) }}
       </p>
-      <div v-if="tools.length === 0" class="empty">暂无可用工具</div>
+      <div v-if="tools.length === 0" class="empty">{{ t('tools.empty') }}</div>
       <ToolCard v-for="tool in tools" :key="tool.name" :tool="tool" />
     </template>
   </div>

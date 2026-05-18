@@ -1,10 +1,13 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useI18n } from '../../composables/useI18n'
 
 const props = defineProps<{
   sseUrl: string
   apiKey?: string
 }>()
+
+const { t } = useI18n()
 
 const configJson = computed(() => {
   const url = props.apiKey
@@ -21,9 +24,9 @@ const configJson = computed(() => {
 
 <template>
   <div class="card">
-    <h3>连接配置</h3>
+    <h3>{{ t('keys.config.title') }}</h3>
     <p style="color:#7a7870;font-size:0.87rem;margin-bottom:10px">
-      在 Claude Desktop / cursor / cline 等支持 MCP 的客户端中使用以下配置：
+      {{ t('keys.config.hint') }}
     </p>
     <pre>{{ configJson }}</pre>
   </div>

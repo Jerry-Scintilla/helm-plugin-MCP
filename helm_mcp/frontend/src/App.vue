@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { useHelmSDK } from './composables/useHelmSDK'
+import { useI18n } from './composables/useI18n'
 import TabBar, { type TabName } from './components/layout/TabBar.vue'
 import ToastNotice from './components/layout/ToastNotice.vue'
 import PanelKeys from './components/keys/PanelKeys.vue'
@@ -8,6 +9,7 @@ import PanelTools from './components/tools/PanelTools.vue'
 import PanelLogs from './components/logs/PanelLogs.vue'
 
 const { init } = useHelmSDK()
+const { t } = useI18n()
 const activeTab = ref<TabName>('keys')
 
 onMounted(() => {
@@ -16,7 +18,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <h1>🤖 MCP 接入管理</h1>
+  <h1>🤖 {{ t('app.title') }}</h1>
 
   <TabBar v-model="activeTab" />
 

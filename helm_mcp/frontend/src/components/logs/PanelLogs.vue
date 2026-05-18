@@ -2,6 +2,7 @@
 import { ref, watch } from 'vue'
 import { useHelmSDK } from '../../composables/useHelmSDK'
 import { useApiFetch } from '../../composables/useApiFetch'
+import { useI18n } from '../../composables/useI18n'
 import LogFilter from './LogFilter.vue'
 import LogTable, { type LogItem } from './LogTable.vue'
 import Pagination from './Pagination.vue'
@@ -15,6 +16,7 @@ const PAGE_SIZE = 50
 
 const { ready } = useHelmSDK()
 const { apiFetch } = useApiFetch()
+const { t } = useI18n()
 
 const items = ref<LogItem[]>([])
 const total = ref(0)
@@ -59,8 +61,8 @@ watch(ready, (isReady) => {
   <div>
     <LogFilter @filter-change="onFilterChange" />
 
-    <div v-if="loading" class="empty">加载中…</div>
-    <div v-else-if="errorMsg" class="error-msg">日志加载失败：{{ errorMsg }}</div>
+    <div v-if="loading" class="empty">{{ t('logs.loading') }}</div>
+    <div v-else-if="errorMsg" class="error-msg">{{ t('logs.loadFailed', { msg: errorMsg }) }}</div>
     <template v-else>
       <LogTable :items="items" />
       <Pagination

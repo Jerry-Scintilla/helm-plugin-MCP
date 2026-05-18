@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { useI18n } from '../../composables/useI18n'
+
 defineProps<{
   tool: {
     name: string
@@ -8,6 +10,8 @@ defineProps<{
     provider_plugin: string
   }
 }>()
+
+const { t } = useI18n()
 </script>
 
 <template>
@@ -16,13 +20,13 @@ defineProps<{
     <div class="tool-desc">{{ tool.description }}</div>
     <div class="tool-meta">
       <span v-if="tool.required_permission" class="perm">
-        🔒 需要权限: {{ tool.required_permission }}
+        {{ t('tools.perm', { perm: tool.required_permission }) }}
       </span>
-      <span v-else style="color:#4a6a50">✓ 无需额外权限</span>
-      <span>来源插件: {{ tool.provider_plugin }}</span>
+      <span v-else style="color:#4a6a50">{{ t('tools.noPerm') }}</span>
+      <span>{{ t('tools.source', { plugin: tool.provider_plugin }) }}</span>
     </div>
     <details>
-      <summary>查看 Input Schema</summary>
+      <summary>{{ t('tools.schema') }}</summary>
       <pre style="margin-top:8px">{{ JSON.stringify(tool.input_schema, null, 2) }}</pre>
     </details>
   </div>
