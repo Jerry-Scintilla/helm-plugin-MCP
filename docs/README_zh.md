@@ -1,102 +1,62 @@
 # helm-plugin-mcp
 
-将 Helm EVE Online 舰队管理系统通过 **Model Context Protocol (MCP)** 完整暴露给大型语言模型。安装此插件后，Claude Desktop、cursor、cline 等支持 MCP 协议的 AI 工具可以直接操作 Helm 的所有功能——查询角色、管理插件、调用其他插件提供的工具——就像一名拥有访问凭证的真实操作员一样。
+将 Helm EVE Online 舰队管理系统通过 **Model Context Protocol (MCP)** 完整暴露给大型语言模型。安装此插件后，Claude Desktop、Cursor、cline 等支持 MCP 协议的 AI 工具可以直接操作 Helm 的所有功能——查询角色、管理插件、调用其他插件提供的工具——就像一名拥有访问凭证的真实操作员一样。
+
+从 `v0.2.0` 起，工具可被拆分到**多个小型 MCP 服务器**（每个最多 12 个 tool），让每条 LLM 连接只看到与当前任务相关的工具子集——例如 fleet、intel、admin。
+
+> **状态**：Alpha 阶段（当前 `0.2.0`），暂不提供 Releases。欢迎开发者参与贡献或 Fork 自行拓展功能。
 
 ---
 
-## 目录
+## 项目简介
 
-- [功能概述](#功能概述)
-- [工作原理](#工作原理)
-- [安装](#安装)
-- [配置 AI 客户端](#配置-ai-客户端)
-- [权限说明](#权限说明)
-- [内置工具](#内置工具)
-- [管理界面](#管理界面)
-- [为其他插件添加 MCP 工具](#为其他插件添加-mcp-工具)
-  - [快速上手（三步）](#快速上手三步)
-  - [MCPToolDef 参数说明](#mcptooldef-参数说明)
-  - [完整示例：舰队行动插件](#完整示例舰队行动插件)
-  - [权限联动](#权限联动)
-  - [错误处理约定](#错误处理约定)
-- [API 端点参考](#api-端点参考)
-- [安全注意事项](#安全注意事项)
+`helm-plugin-mcp` 是 Helm 插件系统与 MCP 兼容 AI 客户端之间的桥梁：
+
+- **内置工具**：提供用户信息查询、角色列表、插件管理、API Key 管理等功能
+- **插件扩展性**：其他 Helm 插件只需实现 `MCPToolProvider` 协议即可自动注册 MCP 工具，无需修改本插件代码
+- **RBAC 集成**：所有工具均受 Helm 现有权限体系保护，LLM 看不到用户无权访问的工具
+- **审计日志**：完整记录每次工具调用的用户、时间、状态和耗时
 
 ---
 
-## 功能概述
+## 功能一览
 
-| 能力 | 说明 |
+| 功能 | 说明 |
 |------|------|
-| **MCP SSE 传输** | 通过标准 SSE 协议接入，兼容所有支持 MCP 的 AI 客户端 |
-| **RBAC 权限管理** | 复用 Helm 现有角色/权限体系，每个 API Key 的可用工具取决于账号的实际权限 |
-| **独立 API Key 凭证** | 每个账号可创建多个 `hlm_` 前缀的 API Key，互相隔离，可随时撤销 |
-| **插件系统扩展** | 其他 Helm 插件实现 `MCPToolProvider` 协议并注册后，工具**自动**出现在 MCP 工具列表中，无需修改本插件任何代码 |
-| **调用审计日志** | 每次工具调用写入数据库，管理员可查看所有用户的调用历史 |
-| **前端管理界面** | 内置三标签页 UI：API Key 管理、工具浏览器、调用日志 |
+| **MCP SSE 传输** | 标准 SSE 协议，兼容所有 MCP 客户端 |
+| **多服务器分组** | 工具按领域拆分到多个逻辑 MCP 服务器（每组 ≤12 个 tool）；每组是独立的 `/sse/{slug}` 端点，LLM 客户端按需订阅 |
+| **Helm RBAC 集成** | 工具可见性与执行均受 Helm 权限控制 |
+| **独立 API Key** | 每个账号可创建多个 `hlm_` 前缀的 API Key，互不影响，可随时撤销；同一 Key 可连接所有服务器组 |
+| **插件自动发现** | 实现 `MCPToolProvider` 的插件自动注册工具；新工具默认进入"未分配"池，由管理员归入服务器组后才暴露 |
+| **审计日志** | 管理员可查看所有用户的调用历史 |
+| **管理界面** | 四标签页侧边栏：API 密钥、服务器分组、工具浏览、调用日志 |
 
 ---
 
-## 工作原理
+## 快速开始
 
-```
-AI 客户端 (Claude Desktop / cursor / cline)
-    │
-    │  GET /api/v1/plugins/helm-mcp/sse?api_key=hlm_xxx   ← SSE 长连接
-    │  POST /api/v1/plugins/helm-mcp/messages/            ← JSON-RPC 消息
-    ▼
-FastAPI 路由层
-    │  验证 API Key → 加载 User + 权限集合 frozenset
-    │  绑定到 ContextVar（当前 SSE 连接隔离）
-    ▼
-MCP Server（mcp.server.lowlevel.Server）
-    ├── list_tools()   按用户权限过滤，返回可用工具列表
-    └── call_tool()    派发到对应插件的 call_mcp_tool()，记录审计日志
-            │
-            ▼
-ExtensionRegistry["mcp.tool_provider"]
-    ├── CoreToolProvider        ← helm-mcp 内置工具
-    ├── FleetActionPlugin       ← 其他插件注册的工具（示例）
-    └── ...                     ← 任意数量的第三方插件
-```
-
-**关键设计：权限在两个层级独立执行**
-
-1. **`list_tools` 阶段**：缺少 `required_permission` 的工具对该用户**静默不可见**，LLM 不会知道管理员工具的存在。
-2. **`call_tool` 阶段**：即使客户端绕过 `list_tools` 直接调用，权限仍会被再次检查并拒绝。
-
----
-
-## 安装
+### 第一步：安装插件
 
 ```bash
-# 1. 安装 Python 包（editable 模式便于开发）
+# 安装 Python 包（editable 模式便于开发）
 pip install -e /path/to/helm-plugin-mcp
 
-# 2. 通过 Helm 管理 API 安装插件（需要 global.plugin_manage 权限）
+# 通过 Helm 管理 API 安装（需要 global.plugin_manage 权限）
 curl -X POST http://localhost:8000/api/v1/admin/plugins/install \
   -H "Authorization: Bearer <your-jwt>" \
   -H "Content-Type: application/json" \
   -d '{"package_name": "helm-plugin-mcp"}'
-
-# 3. 验证安装状态
-curl http://localhost:8000/api/v1/admin/plugins/helm-mcp/status \
-  -H "Authorization: Bearer <your-jwt>"
-# 期望: {"status": "enabled", "is_loaded": true, "router_mounted": true}
 ```
 
----
+### 第二步：分配权限
 
-## 配置 AI 客户端
+在 Helm 管理界面（或通过 API）为需要使用 MCP 的用户角色添加 `mcp.access` 权限。`mcp.admin` 权限用于查看全部审计日志和使用 `helm_manage_plugin`。
 
-### 第一步：为账号分配权限
+### 第三步：创建 API Key
 
-在 Helm 管理界面（或通过 API）为需要使用 MCP 的用户的角色添加 `mcp.access` 权限。
+**Web UI**：访问侧边栏 **🤖 MCP 接入** → **🔑 API Keys** 标签页。
 
-### 第二步：创建 API Key
-
-访问侧边栏 **🤖 MCP 接入** 页面，或通过 API：
-
+**API**：
 ```bash
 curl -X POST http://localhost:8000/api/v1/plugins/helm-mcp/keys \
   -H "Authorization: Bearer <your-jwt>" \
@@ -106,48 +66,39 @@ curl -X POST http://localhost:8000/api/v1/plugins/helm-mcp/keys \
 
 响应中的 `api_key` 字段（`hlm_xxx...`）**只出现一次**，请立即复制保存。
 
-### 第三步：配置 AI 客户端
+### 第四步：创建服务器分组并分配工具
 
-**Claude Desktop** (`claude_desktop_config.json`):
+打开 Helm UI 中的 **🤖 MCP 接入** → **🗂 服务器分组** 标签页（需 `mcp.admin`）：
 
+1. 新建一个或多个服务器分组（例如 `fleet`、`intel`、`admin`），每组最多 **12 个 tool**。
+2. 在页面底部的「未分配池」中找到工具，通过「移动到」下拉菜单把它放进某个分组。
+3. 留在未分配池里的工具**不会暴露给任何 MCP 客户端**——这是有意为之，避免新接入的 tool 未经审核就上线。
+
+建议按领域（业务模块）分组，让每条 LLM 连接只看到当前任务相关的工具。
+
+### 第五步：配置 AI 客户端
+
+**🔑 API 密钥** 标签页会为每个已启用的服务器分组生成一份独立的 JSON 配置，可直接复制粘贴。每个分组就是一条独立的 MCP 连接。
+
+**Claude Desktop**（`~/.claude/claude_desktop_config.json`）：
 ```json
 {
   "mcpServers": {
-    "helm": {
-      "url": "http://your-helm-host/api/v1/plugins/helm-mcp/sse?api_key=hlm_xxx",
+    "helm-fleet": {
+      "url": "http://your-helm-host/api/v1/plugins/helm-mcp/sse/fleet?api_key=hlm_xxx",
+      "transport": "sse"
+    },
+    "helm-intel": {
+      "url": "http://your-helm-host/api/v1/plugins/helm-mcp/sse/intel?api_key=hlm_xxx",
       "transport": "sse"
     }
   }
 }
 ```
 
-**cursor / cline**（`.cursor/mcp.json` 或项目级 MCP 配置）:
+同一个 `api_key` 可以连接所有分组——RBAC 仍由每个 tool 自身的 `required_permission` 控制。
 
-```json
-{
-  "mcpServers": {
-    "helm": {
-      "url": "http://your-helm-host/api/v1/plugins/helm-mcp/sse?api_key=hlm_xxx",
-      "transport": "sse"
-    }
-  }
-}
-```
-
-配置完成后重启 AI 客户端，即可在对话中直接使用 Helm 功能。
-
----
-
-## 权限说明
-
-本插件新增两个全局权限，安装时自动写入数据库：
-
-| 权限名 | 说明 |
-|--------|------|
-| `mcp.access` | 允许通过 MCP 协议连接并调用工具。**用户必须拥有此权限才能使用任何 MCP 功能。** |
-| `mcp.admin` | 可查看所有用户的调用日志（普通用户只能看自己的），以及调用 `helm_manage_plugin` 工具。 |
-
-> `global.superuser` 或 `is_superuser=True` 的用户自动拥有所有权限，包括上述两项。
+重启 AI 客户端，Helm 功能即可按分组使用。
 
 ---
 
@@ -166,19 +117,46 @@ curl -X POST http://localhost:8000/api/v1/plugins/helm-mcp/keys \
 
 ---
 
-## 管理界面
+## 工作原理
 
-插件安装后，侧边栏出现 **🤖 MCP 接入** 菜单项，包含三个标签页：
+```
+AI 客户端 (Claude Desktop / Cursor / cline)
+    │  每个服务器分组一条独立连接
+    │  GET /api/v1/plugins/helm-mcp/sse/{slug}?api_key=hlm_xxx   ← SSE 长连接
+    │  POST /api/v1/plugins/helm-mcp/messages/{slug}/            ← JSON-RPC 消息
+    ▼
+FastAPI 路由层
+    │  验证 API Key → 加载 User + 权限集合 frozenset
+    │  绑定到 ContextVar（当前 SSE 连接隔离）
+    │  解析 {slug} → ServerBundle（懒创建、字典缓存）
+    ▼
+ServerBundle（每个 slug 一个）
+    ├── mcp.server.lowlevel.Server("helm-mcp:{slug}")
+    └── SseServerTransport("/api/v1/plugins/helm-mcp/messages/{slug}/")
+        ├── list_tools()  → 查 DB 取归属此 slug 的 tool，再按权限过滤
+        └── call_tool()   → 调用前再次复查 slug 归属，派发到 provider，写审计日志
+            │
+            ▼
+ExtensionRegistry["mcp.tool_provider"]
+    ├── CoreToolProvider        ← helm-mcp 内置工具
+    └── ...                     ← 任意数量的第三方插件
+```
 
-- **🔑 API 密钥** — 创建专用 MCP 密钥，查看已生成的 Claude Desktop 配置 JSON
-- **🛠 可用工具** — 浏览当前所有已注册的 MCP 工具，展示名称、描述、所需权限、来源插件和 Input Schema
-- **📋 调用日志** — 查看工具调用历史（时间、工具名、状态、耗时、错误信息），支持按工具名和状态过滤
+**关键设计：权限/可见性在三个层级独立执行**
+
+1. **分组归属**：`list_tools` 和 `call_tool` 都只考虑 `MCPToolAssignment` 指向当前 bundle slug 的 tool。未分配的 tool 在任何客户端都看不到。
+2. **`list_tools` 阶段**：缺少 `required_permission` 的工具对该用户**静默不可见**，LLM 不会知道管理员工具的存在。
+3. **`call_tool` 阶段**：即使客户端绕过 `list_tools` 直接调用，权限仍会被再次检查并拒绝。同时会再次确认 tool 仍属于当前 slug，所以管理员调整分组会立即对长连接生效。
+
+**Bundle 生命周期：** bundle 在首次连接时创建并缓存；分配 tool、禁用分组、删除分组都会触发 `drop_bundle(slug)`，取消该 slug 的所有活动 SSE 会话。客户端会自动重连并读到最新的 tool 列表。
 
 ---
 
 ## 为其他插件添加 MCP 工具
 
-这是本插件最核心的扩展机制。任何 Helm 插件只需三步，即可将自己的功能暴露为 MCP 工具，**无需修改 helm-mcp 的任何代码**。
+任何 Helm 插件只需三步，即可将自己的功能暴露为 MCP 工具，**无需修改 helm-mcp 的任何代码**。
+
+详细开发指南请参阅：[插件开发指南](./Plugin_Dev_Guide/README.md)
 
 ### 快速上手（三步）
 
@@ -236,8 +214,6 @@ class MyPlugin(HelmPlugin, MCPToolProvider):
 
 完成。下次 AI 客户端刷新工具列表时，你的工具会自动出现。
 
----
-
 ### MCPToolDef 参数说明
 
 ```python
@@ -272,195 +248,16 @@ input_schema = {
 
 ---
 
-### 完整示例：舰队行动插件
+## 权限说明
 
-以下展示一个假想的 `fleet-action` 插件如何通过 MCP 暴露舰队信息查询和成员踢出功能。
+本插件新增两个全局权限，安装时自动写入数据库：
 
-```python
-# fleet_action/plugin.py
+| 权限名 | 说明 |
+|--------|------|
+| `mcp.access` | 允许通过 MCP 协议连接并调用工具。**用户必须拥有此权限才能使用任何 MCP 功能。** |
+| `mcp.admin` | 可查看所有用户的调用日志（普通用户只能看自己的），以及调用 `helm_manage_plugin` 工具。 |
 
-from pathlib import Path
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.models.user import User
-from app.plugins.base import HelmPlugin, PermissionDef, PluginContext, SidebarItem
-from app.plugins.registry import extension_registry
-from helm_mcp.protocols import MCPToolDef, MCPToolProvider
-
-
-class FleetActionPlugin(HelmPlugin, MCPToolProvider):
-    name = "fleet-action"
-    version = "0.2.0"
-    author = "Jerry_Scintilla"
-    description = "EVE Online 舰队行动管理"
-    helm_sdk_version = ">=1.0,<2.0"
-
-    # ── Helm 插件的常规声明 ────────────────────────────────────────────────
-
-    def get_router(self):
-        from fleet_action.routers import router
-        return router
-
-    def get_permissions(self) -> list[PermissionDef]:
-        return [
-            PermissionDef("fleet-action.read",  "global", "查看舰队数据"),
-            PermissionDef("fleet-action.manage", "global", "管理舰队成员"),
-        ]
-
-    def get_sidebar_items(self) -> list[SidebarItem]:
-        return [SidebarItem("舰队行动", "/plugins/fleet-action", "⚔️", order=150)]
-
-    # ── MCPToolProvider 实现 ───────────────────────────────────────────────
-
-    def get_mcp_tools(self) -> list[MCPToolDef]:
-        return [
-            MCPToolDef(
-                name="fleet_action_list_fleets",
-                description="列出当前活跃的 EVE Online 舰队，返回舰队 ID、指挥官和成员数。",
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "corporation_id": {
-                            "type": "integer",
-                            "description": "按公司 ID 过滤，留空则返回所有舰队",
-                        },
-                    },
-                    "required": [],
-                },
-                required_permission="fleet-action.read",
-            ),
-            MCPToolDef(
-                name="fleet_action_get_fleet_members",
-                description="获取指定舰队的所有成员列表，包括角色名、飞船和位置。",
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "fleet_id": {
-                            "type": "integer",
-                            "description": "目标舰队的 fleet_id",
-                        },
-                    },
-                    "required": ["fleet_id"],
-                },
-                required_permission="fleet-action.read",
-            ),
-            MCPToolDef(
-                name="fleet_action_kick_member",
-                description="将指定成员踢出舰队。需要 fleet-action.manage 权限。",
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "fleet_id":    {"type": "integer", "description": "舰队 ID"},
-                        "character_id": {"type": "integer", "description": "要踢出的角色 ID"},
-                    },
-                    "required": ["fleet_id", "character_id"],
-                },
-                required_permission="fleet-action.manage",
-            ),
-        ]
-
-    async def call_mcp_tool(
-        self,
-        name: str,
-        args: dict,
-        user: User,
-        db: AsyncSession,
-    ) -> dict:
-        if name == "fleet_action_list_fleets":
-            return await self._list_fleets(args, user, db)
-        if name == "fleet_action_get_fleet_members":
-            return await self._get_fleet_members(args, user, db)
-        if name == "fleet_action_kick_member":
-            return await self._kick_member(args, user, db)
-        raise ValueError(f"Unknown tool: {name}")
-
-    # ── 工具的具体实现 ─────────────────────────────────────────────────────
-
-    async def _list_fleets(self, args, user, db) -> dict:
-        from fleet_action.models import Fleet
-        stmt = select(Fleet).where(Fleet.is_active == True)
-        if corp_id := args.get("corporation_id"):
-            stmt = stmt.where(Fleet.corporation_id == corp_id)
-        fleets = (await db.execute(stmt)).scalars().all()
-        return {
-            "fleets": [
-                {
-                    "fleet_id":    f.fleet_id,
-                    "commander":   f.commander_name,
-                    "member_count": f.member_count,
-                    "created_at":  f.created_at.isoformat(),
-                }
-                for f in fleets
-            ]
-        }
-
-    async def _get_fleet_members(self, args, user, db) -> dict:
-        from fleet_action.esi import fetch_fleet_members
-        members = await fetch_fleet_members(args["fleet_id"])
-        return {"fleet_id": args["fleet_id"], "members": members}
-
-    async def _kick_member(self, args, user, db) -> dict:
-        from fleet_action.esi import kick_fleet_member
-        await kick_fleet_member(args["fleet_id"], args["character_id"])
-        return {
-            "success": True,
-            "fleet_id": args["fleet_id"],
-            "kicked_character_id": args["character_id"],
-        }
-
-    # ── 生命周期 ───────────────────────────────────────────────────────────
-
-    def on_enable(self, ctx: PluginContext) -> None:
-        # 注册到 MCP 扩展点
-        extension_registry.register("mcp.tool_provider", self, self.name)
-        # 其他注册...
-```
-
-注册成功后，AI 对话效果示例：
-
-> **用户：** 帮我看看现在有哪些活跃舰队
->
-> **Claude：** *(调用 `fleet_action_list_fleets`)* 目前有 3 支活跃舰队：
-> - 舰队 #7823 — 指挥官 Aiko Danuja，14 名成员
-> - 舰队 #7891 — 指挥官 Vily，32 名成员
-> - ...
-
----
-
-### 权限联动
-
-`required_permission` 与 Helm RBAC 完全联动：
-
-```
-用户角色 → 角色权限 → 工具可见性
-────────────────────────────────────
-player 角色（默认）
-  ├─ mcp.access         → 可见: helm_whoami, helm_list_characters, ...
-  └─ fleet-action.read  → 可见: fleet_action_list_fleets, fleet_action_get_fleet_members
-                          不可见: fleet_action_kick_member（需要 manage）
-                          不可见: helm_manage_plugin（需要 mcp.admin）
-
-fc 角色（假设有 fleet-action.manage）
-  └─ fleet-action.manage → 额外可见: fleet_action_kick_member
-```
-
-拥有权限的用户在 `list_tools` 时才能看到对应工具。权限不足的调用会被记录为 `denied` 状态并返回错误信息，不会抛出异常影响 MCP 会话。
-
----
-
-### 错误处理约定
-
-`call_mcp_tool` 中的异常处理规则：
-
-| 情况 | 做法 | MCP 记录状态 |
-|------|------|-------------|
-| 参数缺失或格式错误 | `raise ValueError("描述")` | `error` |
-| 业务逻辑失败（如 ESI 返回错误） | `raise RuntimeError("描述")` | `error` |
-| 未知工具名 | `raise ValueError(f"Unknown tool: {name}")` | `error` |
-| 权限不足（二次检查） | 交由 MCP server 处理，不需要自行抛出 | `denied` |
-
-工具执行的异常会被 MCP server 捕获，以 `{"error": "...", "detail": "..."}` 格式返回给 LLM，不会中断 MCP 连接。
+> `global.superuser` 或 `is_superuser=True` 的用户自动拥有所有权限，包括上述两项。
 
 ---
 
@@ -468,14 +265,33 @@ fc 角色（假设有 fleet-action.manage）
 
 所有端点均挂载在 `/api/v1/plugins/helm-mcp/` 下：
 
+### MCP 传输（按服务器分组）
+
 | 方法 | 路径 | 认证 | 说明 |
 |------|------|------|------|
-| `GET` | `/sse` | API Key (`?api_key=`) | MCP SSE 连接入口，供 AI 客户端使用 |
-| `POST` | `/messages/` | — | MCP 消息中继（由 SSE transport 内部管理） |
-| `GET` | `/tools` | JWT Bearer | 列出所有可用 MCP 工具（供前端工具浏览器使用） |
+| `GET` | `/sse/{slug}` | API Key (`?api_key=`) | 某个服务器分组的 MCP SSE 入口；slug 不存在或已禁用返回 404 |
+| `POST` | `/messages/{slug}/` | — | MCP 消息中继（由对应 bundle 的 `SseServerTransport` 处理） |
+
+### 只读
+
+| 方法 | 路径 | 认证 | 说明 |
+|------|------|------|------|
+| `GET` | `/tools` | JWT Bearer | 列出所有已注册的 MCP 工具，每个 tool 带 `assigned_server_slug` 字段 |
 | `GET` | `/logs` | JWT Bearer | 查询调用日志，管理员可见全部，普通用户只见自己的 |
-| `GET` | `/config` | JWT Bearer | 返回 AI 客户端所需的连接配置 JSON |
+| `GET` | `/config` | JWT Bearer | 返回**所有已启用**服务器分组的连接配置 JSON |
 | `POST` | `/keys` | JWT Bearer | 为当前用户创建 MCP API Key |
+
+### 服务器分组管理（`mcp.admin`）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET`    | `/servers` | 列出所有服务器分组及其当前 tool 数 |
+| `POST`   | `/servers` | 新建分组 `{slug, name, description?, max_tools?}` |
+| `PATCH`  | `/servers/{id}` | 更新 name / description / max_tools / is_enabled / sort_order |
+| `DELETE` | `/servers/{id}` | 删除分组——其下 tool 回到未分配池（FK `SET NULL`） |
+| `GET`    | `/assignments` | 返回 `{ assigned: { slug: [tool_names] }, unassigned: [tool_names] }` |
+| `POST`   | `/assignments/move` | 移动单个 tool：`{ tool_name, target_server_id \| null }`；目标已满会拒绝 |
+| `POST`   | `/assignments/bulk` | 批量替换一组 tool 的归属（原子；含容量校验） |
 
 ---
 
@@ -486,3 +302,26 @@ fc 角色（假设有 fleet-action.manage）
 - **Key 可随时撤销**：通过 Helm 现有的 `/api/v1/user/tokens/{id}` 端点删除，或在前端操作。
 - **HTTPS**：生产环境务必通过 HTTPS 提供服务，防止 API Key 在传输中泄露（URL 参数会出现在访问日志中）。
 - **审计日志**：所有工具调用均有记录，管理员可随时检查是否有异常调用行为。
+
+---
+
+## 管理界面
+
+插件安装后，侧边栏出现 **🤖 MCP 接入** 菜单项，包含四个标签页：
+
+- **🔑 API 密钥** — 创建专用 MCP 密钥；按每个已启用的服务器分组渲染独立的 Claude Desktop 配置 JSON
+- **🗂 服务器分组**（需 `mcp.admin`）— 增删改服务器分组、启停、容量上限设置；底部展示「未分配池」，通过下拉菜单把 tool 在分组之间移动
+- **🛠 可用工具** — 浏览当前所有已注册的 MCP 工具，每行额外显示「所属服务器」或「未分配」标记
+- **📋 调用日志** — 查看工具调用历史（时间、工具名、状态、耗时、错误信息），支持按工具名和状态过滤
+
+---
+
+## 参与贡献
+
+本插件处于 Alpha 开发状态，欢迎：
+
+- 提交 Issue 报告问题或建议功能
+- Fork 仓库进行二次开发
+- 提交 Pull Request 贡献代码
+
+如有问题，请在 GitHub 上开启 Discussion 或 Issue。

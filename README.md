@@ -1,222 +1,139 @@
 # helm-plugin-mcp
 
-A Helm plugin that exposes the [Helm EVE Online Fleet Management System](https://github.com/jerrysmh/helm) via the **Model Context Protocol (MCP)**, enabling AI assistants like Claude Desktop, Cursor, and cline to interact with Helm's full capabilities — user queries, plugin management, tools provided by other plugins, and more.
+Expose the Helm EVE Online fleet management system completely to large language models through **Model Context Protocol (MCP)**. After installing this plugin, AI tools that support MCP protocol such as Claude Desktop, Cursor, and cline can directly operate all Helm functions——query characters, manage plugins, call tools provided by other plugins——just like a real operator with access credentials.
 
-> **Status**: Alpha. No releases yet. Contributions and forks are welcome.
-
----
-
-## Project Overview
-
-`helm-plugin-mcp` acts as a bridge between Helm's plugin architecture and MCP-compatible AI clients:
-
-- **Integrated tools**: Built-in tools for user info, character listing, plugin management, and API key operations
-- **Plugin extensibility**: Other Helm plugins can register MCP tools via the `MCPToolProvider` protocol — no changes to this plugin required
-- **RBAC integration**: Every tool is gated by Helm's existing permission system; unauthorized tools are silently hidden from the LLM
-- **Audit logging**: All tool calls are recorded with user, timestamp, status, and duration
+> **Status**: Alpha stage (current `0.2.0`). Developers are welcome to contribute or fork for custom extensions.
 
 ---
 
-## Features
+## Core Features
 
 | Feature | Description |
 |---------|-------------|
-| **MCP SSE Transport** | Standard SSE-based transport, compatible with all MCP clients |
-| **Helm RBAC Integration** | Tool visibility and execution both enforced against Helm permissions |
-| **Dedicated API Keys** | `hlm_`-prefixed keys per account, individually revocable |
-| **Plugin Auto-Discovery** | Plugins implementing `MCPToolProvider` auto-register their tools |
-| **Audit Log** | Full call history visible to administrators |
-| **Management UI** | Three-tab sidebar: API Keys, Tool Browser, Call Logs |
+| **MCP SSE Transport** | Standard SSE protocol, compatible with all MCP clients |
+| **Multiple Server Groups** | Tools split into multiple logical MCP servers (≤12 tools each) |
+| **Helm RBAC Integration** | Tool visibility and execution controlled by Helm permissions |
+| **Independent API Keys** | Each account can create multiple `hlm_` prefixed API Keys, independent and revocable |
+| **Automatic Plugin Discovery** | Plugins implementing `MCPToolProvider` automatically register tools |
+| **Audit Logging** | Complete record of each tool invocation with user, timestamp, status, and duration |
+| **Management Interface** | Four-tab sidebar: API Keys, Server Groups, Tool Browser, Call Logs |
 
 ---
 
 ## Quick Start
 
-### 1. Install the plugin
+### Installation
 
 ```bash
-# Install Python package
+# 1. Install Python package (editable mode for development)
 pip install -e /path/to/helm-plugin-mcp
 
-# Install via Helm admin API (requires global.plugin_manage permission)
+# 2. Install via Helm management API (requires global.plugin_manage permission)
 curl -X POST http://localhost:8000/api/v1/admin/plugins/install \
   -H "Authorization: Bearer <jwt>" \
   -H "Content-Type: application/json" \
   -d '{"package_name": "helm-plugin-mcp"}'
 ```
 
-### 2. Grant permissions
+### Configuration Steps
 
-Add `mcp.access` to the roles that need MCP access. `mcp.admin` is required for viewing all audit logs and using `helm_manage_plugin`.
+1. **Assign Permissions**: Add `mcp.access` permission to user roles that need MCP
+2. **Create API Key**: Visit sidebar **🤖 MCP Access** → **🔑 API Keys** tab
+3. **Create Server Groups**: In **🗂 Server Groups** tab, create groups and assign tools
+4. **Configure AI Client**: Use the configuration JSON generated in API Keys tab
 
-### 3. Create an API Key
-
-**Web UI**: Navigate to **🤖 MCP Access** in the sidebar → **🔑 API Keys** tab.
-
-**API**:
-```bash
-curl -X POST http://localhost:8000/api/v1/plugins/helm-mcp/keys \
-  -H "Authorization: Bearer <jwt>" \
-  -H "Content-Type: application/json" \
-  -d '{"name": "claude-desktop"}'
-```
-
-Copy the returned `api_key` value — it will **only be shown once**.
-
-### 4. Configure your AI client
-
-**Claude Desktop** (`~/.claude/claude_desktop_config.json`):
-```json
-{
-  "mcpServers": {
-    "helm": {
-      "url": "http://your-helm-host/api/v1/plugins/helm-mcp/sse?api_key=hlm_xxx",
-      "transport": "sse"
-    }
-  }
-}
-```
-
-**Cursor / cline** (project-level or global MCP config):
-```json
-{
-  "mcpServers": {
-    "helm": {
-      "url": "http://your-helm-host/api/v1/plugins/helm-mcp/sse?api_key=hlm_xxx",
-      "transport": "sse"
-    }
-  }
-}
-```
-
-Restart your AI client. Helm's tools will now be available in your conversations.
+For detailed setup guide, see: [Complete Documentation](./docs/README.md)
 
 ---
 
 ## Built-in Tools
 
-| Tool | Permission | Description |
-|------|------------|-------------|
-| `helm_whoami` | `mcp.access` | Returns current user's id, username, roles, and permissions |
-| `helm_list_characters` | `mcp.access` | Lists all EVE Online characters bound to the current user |
-| `helm_list_plugins` | `mcp.access` | Lists all installed plugins, with optional `enabled_only` filter |
-| `helm_manage_plugin` | `mcp.admin` | Enables or disables a plugin (`action: "enable"` / `"disable"`) |
-| `helm_list_my_api_keys` | `mcp.access` | Lists the current user's API keys (prefixes only, secrets hidden) |
-| `helm_create_mcp_api_key` | `mcp.access` | Creates a new API key for the current user |
+```
+helm_whoami              — Return current user information
+helm_list_characters    — List bound EVE Online characters
+helm_list_plugins       — List installed plugins
+helm_manage_plugin      — Enable or disable plugins
+helm_list_my_api_keys   — List personal API Keys
+helm_create_mcp_api_key — Create new API Key
+```
 
 ---
 
-## Architecture
+## Adding Tools to Other Plugins
 
-```
-AI Client (Claude Desktop / Cursor / cline)
-    │
-    │  GET /api/v1/plugins/helm-mcp/sse?api_key=hlm_xxx   ← SSE long-lived connection
-    │  POST /api/v1/plugins/helm-mcp/messages/            ← JSON-RPC messages
-    ▼
-FastAPI Router
-    │  Validate API Key → Load User + frozenset of permissions
-    │  Bind to ContextVar (per-connection isolation)
-    ▼
-MCP Server (mcp.server.lowlevel.Server)
-    ├── list_tools()   → filter by user permissions
-    └── call_tool()    → dispatch to plugin's call_mcp_tool(), write audit log
-            │
-            ▼
-ExtensionRegistry["mcp.tool_provider"]
-    ├── CoreToolProvider        ← helm-mcp built-in tools
-    ├── OtherPlugin             ← third-party plugin tools
-    └── ...                     ← any number of plugins
-```
-
-**Permission enforcement happens at two independent levels:**
-
-1. **`list_tools`**: Tools requiring a permission the user lacks are **silently invisible** to the LLM
-2. **`call_tool`**: Even if a client bypasses `list_tools`, permissions are re-checked and the call is rejected
-
----
-
-## For Plugin Developers
-
-Other Helm plugins can expose tools via MCP by implementing the `MCPToolProvider` protocol. See the full development guide:
-
-- [Plugin Developer Guide](./docs/README_zh.md) (Chinese)
-- Extension point: `ExtensionRegistry["mcp.tool_provider"]`
-
-### Minimal Example
+Any Helm plugin can expose its functionality as MCP tools in just three steps, without modifying this plugin:
 
 ```python
+# 1. Import protocol
 from helm_mcp.protocols import MCPToolDef, MCPToolProvider
 from app.plugins.registry import extension_registry
 
+# 2. Implement interface
 class MyPlugin(HelmPlugin, MCPToolProvider):
-
     def get_mcp_tools(self) -> list[MCPToolDef]:
-        return [
-            MCPToolDef(
-                name="my_plugin_do_thing",
-                description="Does something useful",
-                input_schema={
-                    "type": "object",
-                    "properties": {"item_id": {"type": "integer"}},
-                    "required": ["item_id"],
-                },
-                required_permission="my-plugin.use",
-            ),
-        ]
-
+        return [MCPToolDef(...)]
+    
     async def call_mcp_tool(self, name: str, args: dict, user: User, db: AsyncSession) -> dict:
-        if name == "my_plugin_do_thing":
-            return {"result": "done"}
-        raise ValueError(f"Unknown tool: {name}")
+        # Tool implementation...
+        return {...}
 
-    def on_enable(self, ctx: PluginContext) -> None:
-        extension_registry.register("mcp.tool_provider", self, self.name)
+# 3. Register in on_enable
+def on_enable(self, ctx: PluginContext) -> None:
+    extension_registry.register("mcp.tool_provider", self, self.name)
 ```
 
----
-
-## API Reference
-
-All endpoints are mounted under `/api/v1/plugins/helm-mcp/`:
-
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| `GET` | `/sse` | API Key (`?api_key=`) | MCP SSE connection endpoint |
-| `POST` | `/messages/` | — | MCP message relay (managed internally by SSE transport) |
-| `GET` | `/tools` | JWT Bearer | Lists all registered MCP tools (for UI tool browser) |
-| `GET` | `/logs` | JWT Bearer | Query audit logs (admin sees all, users see only their own) |
-| `GET` | `/config` | JWT Bearer | Returns AI client connection configuration JSON |
-| `POST` | `/keys` | JWT Bearer | Creates an MCP API key for the current user |
+For detailed development guide, see: [Plugin Development](./docs/README.md#adding-tools-to-other-plugins)
 
 ---
 
-## Security Notes
+## Permissions
 
-- **API keys are shown only once** — copy immediately after creation; if lost, delete and recreate
-- **Principle of least privilege** — create separate keys for different use cases with different roles
-- **HTTPS required in production** — API keys in URL parameters may appear in access logs
-- **Audit logs** — administrators can review all tool invocations for anomalies
+| Permission | Description |
+|------------|-------------|
+| `mcp.access` | Allow connecting via MCP and calling tools (required) |
+| `mcp.admin` | View call logs for all users, manage plugins |
 
 ---
 
 ## Documentation
 
-| Document | Language | Description |
-|----------|----------|-------------|
-| [README](./README.md) | English | Project overview |
-| [README_zh](./docs/README_zh.md) | 中文 | 项目说明（原始文档） |
-| [Plugin Developer Guide](./docs/README_zh.md) | 中文 | Full plugin development documentation |
+| Document | Description |
+|----------|-------------|
+| [Complete Docs (English)](./docs/README.md) | API endpoints, detailed setup, full examples, security guide |
+| [完整文档 (中文)](./docs/README_zh.md) | API 端点、详细配置、完整示例、安全指南 |
+| [Plugin Development Guide](./Plugin_Dev_Guide/README.md) | Complete Helm plugin development documentation |
+
+---
+
+## Usage Demo
+
+### Github Copilot with SRP Reimbursement Requests
+
+The following demo shows how to use the SRP plugin tools through Github Copilot's MCP access to process a complete reimbursement request workflow.
+
+#### 1. Preview Reimbursement Information
+
+![Preview Killmail](./docs/screenshot/SRP_1.png)
+*Claude previews reimbursement request information using the `srp_preview_killmail` tool*
+
+#### 2. Submit Reimbursement Request
+
+![Submit SRP Request](./docs/screenshot/SRP_2.png)
+*Submit a reimbursement request using the `srp_submit_request` tool; the system returns the request ID and amount*
+
+#### 3. View and Approve Requests
+
+![View Requests](./docs/screenshot/SRP_3.png)
+*View request list and approve requests using `srp_list_requests` and `srp_review_request` tools*
 
 ---
 
 ## Contributing
 
-This plugin is in alpha stage. Contributions, issues, and forks are all welcome. To get started:
+This plugin is in Alpha development stage. We welcome:
 
-1. Fork the repository
-2. Create a feature branch
-3. Implement your changes
-4. Submit a pull request
+- Submitting Issues to report problems or suggest features
+- Forking the repository for custom development
+- Submitting Pull Requests to contribute code
 
-For questions or discussions, please open an issue on GitHub.
+If you have questions, please open a Discussion or Issue on GitHub.
