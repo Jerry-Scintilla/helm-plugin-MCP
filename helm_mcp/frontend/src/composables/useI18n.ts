@@ -2,8 +2,7 @@ import { useHelmSDK } from './useHelmSDK'
 import zh from '../locales/zh'
 import en from '../locales/en'
 
-type Messages = typeof zh
-const messages: Record<string, Messages> = { zh, en }
+const messages: Record<string, unknown> = { zh, en }
 
 function getNestedValue(obj: Record<string, unknown>, key: string): string {
   const value = key.split('.').reduce<unknown>((acc, k) => {
