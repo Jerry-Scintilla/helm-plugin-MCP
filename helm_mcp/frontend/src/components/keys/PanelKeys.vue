@@ -6,25 +6,39 @@ import { useI18n } from '../../composables/useI18n'
 import KeyCreateForm from './KeyCreateForm.vue'
 import ConfigDisplay from './ConfigDisplay.vue'
 
-interface MCPConfig { sse_url: string }
+interface ServerConfigEntry {
+  slug: string
+  name: string
+  sse_url: string
+  messages_url: string
+  tool_count: number
+}
+interface MCPConfig {
+  auth_param: string
+  auth_prefix: string
+  protocol_version: string
+  servers: ServerConfigEntry[]
+}
 
 const { ready } = useHelmSDK()
 const { apiFetch } = useApiFetch()
 const { t } = useI18n()
 
-const sseUrl = ref('')
+const servers = ref<ServerConfigEntry[]>([])
+const loaded = ref(false)
 const lastCreatedKey = ref<string | undefined>()
 
 async function loadConfig() {
   try {
     const cfg = await apiFetch<MCPConfig>('/config')
-    sseUrl.value = cfg.sse_url
+    servers.value = cfg.servers || []
   } catch {
-    sseUrl.value = ''
+    servers.value = []
+  } finally {
+    loaded.value = true
   }
 }
 
-// Load config once the SDK handshake completes
 watch(ready, (isReady) => {
   if (isReady) loadConfig()
 }, { immediate: true })
@@ -37,13 +51,18 @@ function onKeyCreated(apiKey: string) {
 <template>
   <div>
     <KeyCreateForm @key-created="onKeyCreated" />
-    <ConfigDisplay
-      v-if="sseUrl"
-      :sse-url="sseUrl"
-      :api-key="lastCreatedKey"
-    />
-    <div v-else class="card">
-      <pre>{{ sseUrl === '' ? t('keys.loading') : t('keys.configFailed') }}</pre>
-    </div>
+
+    <div v-if="!loaded" class="card"><pre>{{ t('keys.loading') }}</pre></div>
+    <template v-else>
+      <div v-if="servers.length === 0" class="card">
+        <p>{{ t('keys.config.noServers') }}</p>
+      </div>
+      <ConfigDisplay
+        v-for="s in servers"
+        :key="s.slug"
+        :server="s"
+        :api-key="lastCreatedKey"
+      />
+    </template>
   </div>
 </template>

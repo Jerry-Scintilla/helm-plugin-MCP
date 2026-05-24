@@ -8,6 +8,7 @@ defineProps<{
     input_schema: Record<string, unknown>
     required_permission: string | null
     provider_plugin: string
+    assigned_server_slug: string | null
   }
 }>()
 
@@ -24,6 +25,10 @@ const { t } = useI18n()
       </span>
       <span v-else style="color:#4a6a50">{{ t('tools.noPerm') }}</span>
       <span>{{ t('tools.source', { plugin: tool.provider_plugin }) }}</span>
+      <span v-if="tool.assigned_server_slug">
+        {{ t('tools.assignedTo', { slug: tool.assigned_server_slug }) }}
+      </span>
+      <span v-else style="color:#a06060">{{ t('tools.unassigned') }}</span>
     </div>
     <details>
       <summary>{{ t('tools.schema') }}</summary>

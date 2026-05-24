@@ -11,6 +11,7 @@ interface MCPTool {
   input_schema: Record<string, unknown>
   required_permission: string | null
   provider_plugin: string
+  assigned_server_slug: string | null
 }
 
 const { ready } = useHelmSDK()

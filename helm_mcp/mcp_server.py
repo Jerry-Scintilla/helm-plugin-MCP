@@ -1,12 +1,13 @@
 """
-Core MCP server module.
+Core MCP server module — multi-server variant.
 
-Contains:
-- Module-level Server + SseServerTransport singletons
-- ContextVar-based per-session user/permission propagation
-- list_tools and call_tool handlers
-- Authentication logic (API key → User + permission frozenset)
-- SSE connection entry point called by routers.py
+Each logical MCP server (a row in helm_mcp_servers) gets its own ServerBundle
+containing a dedicated mcp.server.lowlevel.Server and SseServerTransport.
+Bundles are created lazily on first SSE connection and cached.
+
+A tool is visible to a bundle only when an MCPToolAssignment maps it to that
+bundle's slug. Tools without an assignment row are not exposed to any SSE
+endpoint (admins manage them via the management UI).
 """
 from __future__ import annotations
 
@@ -15,6 +16,7 @@ import hashlib
 import json
 import time
 from contextvars import ContextVar
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
@@ -31,24 +33,32 @@ from app.models.rbac import Permission, RolePermission, UserRole
 from app.models.user import User
 from app.plugins.registry import extension_registry
 
-from helm_mcp.models import MCPCallLog
-from helm_mcp.protocols import MCPToolProvider
+from helm_mcp.models import MCPCallLog, MCPServer, MCPToolAssignment
+from helm_mcp.protocols import MCPToolDef, MCPToolProvider
 
-# ── Module-level singletons ──────────────────────────────────────────────────
+# ── URL constants ─────────────────────────────────────────────────────────────
 
-# One Server instance for the entire process; ContextVars provide per-session isolation.
-_server = Server("helm-mcp")
+_MESSAGES_PATH_PREFIX = "/api/v1/plugins/helm-mcp/messages"
 
-# The SSE transport. The path here is the relative URL the transport tells the client
-# to POST messages to — it must match the /messages/ route in routers.py.
-_sse_transport = SseServerTransport("/api/v1/plugins/helm-mcp/messages/")
 
-# Per-session context vars — set once per SSE connection, read by tool handlers.
+# ── Per-session context vars (shared across all bundles) ─────────────────────
+
 _mcp_user: ContextVar[User] = ContextVar("mcp_user")
 _mcp_perms: ContextVar[frozenset[str]] = ContextVar("mcp_perms")
 
-# Active SSE connection tasks — cancelled when the plugin is disabled.
-_active_sse_tasks: set["asyncio.Task[None]"] = set()
+
+# ── ServerBundle ──────────────────────────────────────────────────────────────
+
+@dataclass
+class ServerBundle:
+    slug: str
+    server: Server
+    transport: SseServerTransport
+    active_tasks: set["asyncio.Task[None]"] = field(default_factory=set)
+
+
+_bundles: dict[str, ServerBundle] = {}
+_bundles_lock = asyncio.Lock()
 
 
 # ── Helper: superuser sentinel ───────────────────────────────────────────────
@@ -64,32 +74,43 @@ def _has_perm(perms: frozenset[str], perm_name: str) -> bool:
     )
 
 
-# ── Helper: collect providers ────────────────────────────────────────────────
+# ── Helper: collect providers & build tool index ────────────────────────────
 
 def _get_providers() -> list[MCPToolProvider]:
     return extension_registry.get_all("mcp.tool_provider")
 
 
-def _build_tool_index() -> dict[str, tuple[MCPToolProvider, Any]]:
-    """Returns {tool_name: (provider, MCPToolDef)}."""
-    index: dict[str, tuple[MCPToolProvider, Any]] = {}
+def _build_global_tool_index() -> dict[str, tuple[MCPToolProvider, MCPToolDef]]:
+    """All tools currently exposed by all registered providers, keyed by tool name."""
+    index: dict[str, tuple[MCPToolProvider, MCPToolDef]] = {}
     for provider in _get_providers():
         for tool_def in provider.get_mcp_tools():
             index[tool_def.name] = (provider, tool_def)
     return index
 
 
+async def _tools_assigned_to(slug: str) -> dict[str, tuple[MCPToolProvider, MCPToolDef]]:
+    """Subset of the global tool index whose assignment row points to this slug."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(MCPToolAssignment.tool_name)
+            .join(MCPServer, MCPServer.id == MCPToolAssignment.server_id)
+            .where(MCPServer.slug == slug)
+            .order_by(MCPToolAssignment.sort_order.asc())
+        )
+        assigned_names = {row[0] for row in result.fetchall()}
+
+    global_index = _build_global_tool_index()
+    return {name: entry for name, entry in global_index.items() if name in assigned_names}
+
+
 # ── Authentication ────────────────────────────────────────────────────────────
 
 async def _authenticate(api_key: str) -> tuple[User, frozenset[str]]:
-    """
-    Validate a raw hlm_... API key, load the owning User, and build
-    the user's permission frozenset. Raises HTTPException on failure.
-    """
+    """Validate API key, load User and permission set."""
     token_hash = hashlib.sha256(api_key.encode()).hexdigest()
 
     async with AsyncSessionLocal() as db:
-        # Fetch the token + user in one query
         result = await db.execute(
             select(User)
             .join(APIToken, APIToken.user_id == User.id)
@@ -104,7 +125,6 @@ async def _authenticate(api_key: str) -> tuple[User, frozenset[str]]:
         if user is None:
             raise HTTPException(status_code=401, detail="无效的 API 密钥")
 
-        # Check token expiry
         token_result = await db.execute(
             select(APIToken).where(APIToken.token_hash == token_hash)
         )
@@ -112,11 +132,9 @@ async def _authenticate(api_key: str) -> tuple[User, frozenset[str]]:
         if token.expires_at and token.expires_at < datetime.now(UTC):
             raise HTTPException(status_code=401, detail="API 密钥已过期")
 
-        # Update last_used_at
         token.last_used_at = datetime.now(UTC)
         await db.commit()
 
-        # Build permission set
         if user.is_superuser:
             perms: frozenset[str] = frozenset([_SUPERUSER_SENTINEL])
         else:
@@ -147,7 +165,6 @@ async def _log_call(
     error_message: str | None,
     duration_ms: int | None,
 ) -> None:
-    """Write an audit row. Uses its own session to avoid contaminating callers."""
     try:
         async with AsyncSessionLocal() as db:
             log = MCPCallLog(
@@ -162,191 +179,192 @@ async def _log_call(
             db.add(log)
             await db.commit()
     except Exception:
-        pass  # logging failures must never break tool calls
+        pass
 
 
-# ── MCP Server handlers ───────────────────────────────────────────────────────
+# ── Bundle factory + handler binding ─────────────────────────────────────────
 
-@_server.list_tools()
-async def _handle_list_tools() -> list[types.Tool]:
-    """
-    Returns only the tools whose required_permission the current user holds.
-    Silently omitting admin tools prevents LLMs from learning about them.
-    """
-    perms = _mcp_perms.get()
-    tools: list[types.Tool] = []
-
-    for provider in _get_providers():
-        for tool_def in provider.get_mcp_tools():
+def _make_list_tools(slug: str):
+    async def handler() -> list[types.Tool]:
+        perms = _mcp_perms.get()
+        tools_for_slug = await _tools_assigned_to(slug)
+        out: list[types.Tool] = []
+        for _, tool_def in tools_for_slug.values():
             if tool_def.required_permission is not None:
                 if not _has_perm(perms, tool_def.required_permission):
                     continue
-            tools.append(
+            out.append(
                 types.Tool(
                     name=tool_def.name,
                     description=tool_def.description,
                     inputSchema=tool_def.input_schema,
                 )
             )
-    return tools
+        return out
+    return handler
 
 
-@_server.call_tool()
-async def _handle_call_tool(
-    name: str, arguments: dict
-) -> list[types.TextContent]:
-    """
-    Dispatches a tool call to the correct provider.
-    Enforces permissions, creates a fresh DB session per call, and logs every
-    invocation to MCPCallLog.
-    """
-    user = _mcp_user.get()
-    perms = _mcp_perms.get()
+def _make_call_tool(slug: str):
+    async def handler(name: str, arguments: dict) -> list[types.TextContent]:
+        user = _mcp_user.get()
+        perms = _mcp_perms.get()
 
-    tool_index = _build_tool_index()
-    entry = tool_index.get(name)
+        # Re-verify assignment at call time — protects against admins re-assigning
+        # a tool between this session's list_tools and call_tool.
+        tools_for_slug = await _tools_assigned_to(slug)
+        entry = tools_for_slug.get(name)
+        if entry is None:
+            await _log_call(user.id, name, arguments, "error",
+                            f"tool not assigned to server '{slug}'", None)
+            raise ValueError(f"Unknown MCP tool for server '{slug}': {name}")
 
-    if entry is None:
-        await _log_call(user.id, name, arguments, "error", "tool not found", None)
-        raise ValueError(f"Unknown MCP tool: {name}")
+        provider, tool_def = entry
 
-    provider, tool_def = entry
-
-    # Permission enforcement (defence-in-depth; list_tools already filters)
-    if tool_def.required_permission and not _has_perm(perms, tool_def.required_permission):
-        await _log_call(
-            user.id, name, arguments, "denied",
-            f"missing permission: {tool_def.required_permission}", None,
-        )
-        return [
-            types.TextContent(
-                type="text",
-                text=json.dumps(
-                    {
+        if tool_def.required_permission and not _has_perm(perms, tool_def.required_permission):
+            await _log_call(
+                user.id, name, arguments, "denied",
+                f"missing permission: {tool_def.required_permission}", None,
+            )
+            return [
+                types.TextContent(
+                    type="text",
+                    text=json.dumps({
                         "error": "permission_denied",
                         "required_permission": tool_def.required_permission,
-                    }
-                ),
-            )
-        ]
+                    }),
+                )
+            ]
 
-    start_ms = int(time.monotonic() * 1000)
-    try:
-        async with AsyncSessionLocal() as db:
-            result = await provider.call_mcp_tool(name, arguments, user, db)
-        duration = int(time.monotonic() * 1000) - start_ms
-        await _log_call(user.id, name, arguments, "success", None, duration)
-        return [
-            types.TextContent(type="text", text=json.dumps(result, default=str))
-        ]
-    except Exception as exc:
-        duration = int(time.monotonic() * 1000) - start_ms
-        await _log_call(user.id, name, arguments, "error", str(exc), duration)
-        return [
-            types.TextContent(
-                type="text",
-                text=json.dumps(
-                    {"error": type(exc).__name__, "detail": str(exc)}
-                ),
-            )
-        ]
+        start_ms = int(time.monotonic() * 1000)
+        try:
+            async with AsyncSessionLocal() as db:
+                result = await provider.call_mcp_tool(name, arguments, user, db)
+            duration = int(time.monotonic() * 1000) - start_ms
+            await _log_call(user.id, name, arguments, "success", None, duration)
+            return [types.TextContent(type="text", text=json.dumps(result, default=str))]
+        except Exception as exc:
+            duration = int(time.monotonic() * 1000) - start_ms
+            await _log_call(user.id, name, arguments, "error", str(exc), duration)
+            return [
+                types.TextContent(
+                    type="text",
+                    text=json.dumps({"error": type(exc).__name__, "detail": str(exc)}),
+                )
+            ]
+    return handler
 
 
-# ── SSE connection entry point ────────────────────────────────────────────────
+async def _create_bundle(slug: str) -> ServerBundle:
+    server = Server(f"helm-mcp:{slug}")
+    transport = SseServerTransport(f"{_MESSAGES_PATH_PREFIX}/{slug}/")
+
+    # Bind handlers using the lowlevel Server's decorator API
+    server.list_tools()(_make_list_tools(slug))
+    server.call_tool()(_make_call_tool(slug))
+
+    return ServerBundle(slug=slug, server=server, transport=transport)
+
+
+async def get_or_create_bundle(slug: str) -> ServerBundle:
+    bundle = _bundles.get(slug)
+    if bundle is not None:
+        return bundle
+    async with _bundles_lock:
+        bundle = _bundles.get(slug)
+        if bundle is None:
+            bundle = await _create_bundle(slug)
+            _bundles[slug] = bundle
+    return bundle
+
+
+def get_bundle(slug: str) -> ServerBundle | None:
+    return _bundles.get(slug)
+
+
+# ── SSE connection entry points ───────────────────────────────────────────────
 
 async def _run_sse_session(
+    bundle: ServerBundle,
     request: Request,
     user: User,
     perms: frozenset[str],
 ) -> None:
-    """Inner coroutine that runs the actual SSE+MCP session."""
     user_token = _mcp_user.set(user)
     perm_token = _mcp_perms.set(perms)
     task = asyncio.current_task()
     if task is not None:
-        _active_sse_tasks.add(task)
+        bundle.active_tasks.add(task)
     try:
-        async with _sse_transport.connect_sse(
+        async with bundle.transport.connect_sse(
             request.scope, request.receive, request._send  # type: ignore[attr-defined]
         ) as streams:
-            await _server.run(
+            await bundle.server.run(
                 streams[0],
                 streams[1],
-                _server.create_initialization_options(),
+                bundle.server.create_initialization_options(),
             )
     finally:
         _mcp_user.reset(user_token)
         _mcp_perms.reset(perm_token)
         if task is not None:
-            _active_sse_tasks.discard(task)
+            bundle.active_tasks.discard(task)
 
 
-async def handle_sse_connection(request: Request, api_key: str) -> None:
-    """
-    Called by the FastAPI GET /sse route.
+async def handle_sse_connection(slug: str, request: Request, api_key: str) -> None:
+    """Entry point called by GET /sse/{slug}.
 
-    1. Authenticates the API key and loads the user + permissions.
-    2. Binds them to ContextVars for the lifetime of this SSE task.
-    3. Runs the MCP server over the SSE streams until the client disconnects.
-
-    The session is wrapped in asyncio.wait_for with a deadline so that if
-    cancel_all_sse_connections() cannot interrupt the task (e.g. the MCP
-    library swallows CancelledError in aly close()), the task still exits
-    after the timeout rather than hanging forever and exhausting the DB pool.
+    Caller (the route) is responsible for verifying that the slug exists and
+    is enabled in the DB.
     """
     user, perms = await _authenticate(api_key)
+    bundle = await get_or_create_bundle(slug)
 
-    SSE_SESSION_DEADLINE = 300.0  # 5 minutes — normal SSE connections expire well before this
-
+    SSE_SESSION_DEADLINE = 300.0
     try:
         await asyncio.wait_for(
-            _run_sse_session(request, user, perms),
+            _run_sse_session(bundle, request, user, perms),
             timeout=SSE_SESSION_DEADLINE,
         )
     except asyncio.TimeoutError:
-        # Should not happen for a normal session. If it does, force-exit
-        # rather than hang the DB pool.
         pass
 
 
-def get_sse_transport() -> SseServerTransport:
-    return _sse_transport
+# ── Lifecycle: cancel and drop bundles ───────────────────────────────────────
+
+def _cancel_bundle_tasks(bundle: ServerBundle) -> None:
+    """Cancel all active SSE tasks of one bundle. Fire-and-forget grace wait."""
+    if not bundle.active_tasks:
+        return
+
+    CANCEL_TIMEOUT = 5.0
+    for task in list(bundle.active_tasks):
+        task.cancel()
+
+    async def _wait() -> None:
+        done, pending = await asyncio.wait(
+            bundle.active_tasks, timeout=CANCEL_TIMEOUT
+        )
+        for t in pending:
+            t.cancel()
+        bundle.active_tasks.clear()
+
+    try:
+        asyncio.get_running_loop().call_soon(
+            lambda: asyncio.create_task(_wait())
+        )
+    except RuntimeError:
+        # No running loop — nothing we can do; tasks are already cancelled.
+        pass
 
 
 def cancel_all_sse_connections() -> None:
-    """
-    Cancel all active SSE connection tasks. Called by on_disable to prevent hangs.
+    """Cancel SSE on every bundle. Called by plugin on_disable."""
+    for bundle in list(_bundles.values()):
+        _cancel_bundle_tasks(bundle)
 
-    Importantly, this does NOT clear _active_sse_tasks immediately — we give
-    cancelled tasks a grace period (CANCEL_TIMEOUT) to actually exit before
-    abandoning them. This prevents the race where cancel() schedules
-    CancelledError but the task is stuck in q.join() and never exits, causing
-    uninstall_plugin's DB session to hang forever.
-    """
-    CANCEL_TIMEOUT = 5.0  # seconds — generous but bounded
 
-    if not _active_sse_tasks:
-        return
-
-    # Request cancellation for all tasks
-    for task in list(_active_sse_tasks):
-        task.cancel()
-
-    # SCHEDULE waiting for tasks to actually exit, rather than clearing
-    # the set immediately.  The wait must be done in a background task so
-    # that on_disable does not block forever if a task is genuinely stuck.
-    async def _wait_for_tasks():
-        done, pending = await asyncio.wait(
-            _active_sse_tasks, timeout=CANCEL_TIMEOUT
-        )
-        # If some tasks are still not done (stuck in q.join()), abandon them
-        for t in pending:
-            t.cancel()
-        _active_sse_tasks.clear()
-
-    # Fire-and-forget; on_disable will not block on this.
-    # get_running_loop() is preferred over get_event_loop() in Python 3.10+
-    # when called from a synchronous function invoked inside a running loop.
-    asyncio.get_running_loop().call_soon(
-        lambda: asyncio.create_task(_wait_for_tasks())
-    )
+def drop_bundle(slug: str) -> None:
+    """Cancel and remove a bundle. Called when a server row is deleted/disabled."""
+    bundle = _bundles.pop(slug, None)
+    if bundle is not None:
+        _cancel_bundle_tasks(bundle)

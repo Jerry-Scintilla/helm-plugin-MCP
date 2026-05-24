@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { useI18n } from '../../composables/useI18n'
 
-export type TabName = 'keys' | 'tools' | 'logs'
+export type TabName = 'keys' | 'servers' | 'tools' | 'logs'
 
 const props = defineProps<{ modelValue: TabName }>()
 const emit = defineEmits<{ (e: 'update:modelValue', tab: TabName): void }>()
@@ -10,6 +10,7 @@ const { t } = useI18n()
 
 const tabs: { name: TabName }[] = [
   { name: 'keys' },
+  { name: 'servers' },
   { name: 'tools' },
   { name: 'logs' },
 ]
